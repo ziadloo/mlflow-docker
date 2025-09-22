@@ -1,4 +1,4 @@
-FROM ghcr.io/mlflow/mlflow:v3.4.0rc0
+FROM ghcr.io/mlflow/mlflow:v3.4.0
 
 RUN apt-get -y update && \
     apt-get -y install python3-dev default-libmysqlclient-dev build-essential pkg-config && \
