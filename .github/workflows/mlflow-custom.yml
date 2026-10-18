@@ -1,6 +1,12 @@
 name: Build and Push Custom MLflow Image
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - Dockerfile
+      - .github/workflows/mlflow-custom.yml
   schedule:
     - cron: '0 2 * * 1' # Every Monday at 2:00 UTC
   workflow_dispatch:
@@ -13,55 +19,69 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v7
 
-    - name: Get Latest MLflow Version
-      id: get-version
-      run: |
-        VERSION=$(curl -s https://api.github.com/repos/mlflow/mlflow/releases/latest | jq -r '.tag_name')
-        echo "Latest version: $VERSION"
-        echo "VERSION=$VERSION" >> $GITHUB_ENV
-        echo "::set-output name=version::$VERSION"
+      - name: Get Latest MLflow Version
+        id: get-version
+        run: |
+          VERSION="$(curl --fail --silent --show-error https://api.github.com/repos/mlflow/mlflow/releases/latest | jq -er '.tag_name')"
+          echo "Latest version: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-    - name: Check if image already exists on Docker Hub
-      id: check-image
-      run: |
-        if curl --silent --fail "https://hub.docker.com/v2/repositories/yourdockerhubuser/mlflow-custom/tags/${{ env.VERSION }}/"; then
-          echo "Image already exists for version $VERSION."
-          echo "exists=true" >> $GITHUB_OUTPUT
-        else
-          echo "Image does not exist."
-          echo "exists=false" >> $GITHUB_OUTPUT
-        fi
+      - name: Check if image already exists on Docker Hub
+        id: check-image
+        if: github.event_name == 'schedule'
+        env:
+          VERSION: ${{ steps.get-version.outputs.version }}
+        run: |
+          if curl --silent --fail --output /dev/null "https://hub.docker.com/v2/repositories/ziadloo/mlflow/tags/${VERSION}/"; then
+            echo "Image already exists for $VERSION."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Image does not exist for $VERSION."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
 
-    - name: Update Dockerfile
-      if: steps.check-image.outputs.exists == 'false'
-      run: |
-        sed -i "s|FROM ghcr.io/mlflow/mlflow:.*|FROM ghcr.io/mlflow/mlflow:${{ env.VERSION }}|" Dockerfile
+      - name: Update Dockerfile base image
+        if: github.event_name != 'schedule' || steps.check-image.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.get-version.outputs.version }}
+        run: |
+          sed -i "s|^FROM ghcr.io/mlflow/mlflow:.*|FROM ghcr.io/mlflow/mlflow:${VERSION}|" Dockerfile
 
-    - name: Commit and Push Dockerfile Update
-      if: steps.check-image.outputs.exists == 'false'
-      run: |
-        git config --global user.name "github-actions"
-        git config --global user.email "github-actions@github.com"
-        git add Dockerfile
-        git commit -m "Update MLflow base image to $VERSION" || echo "No changes to commit"
-        git push origin HEAD
+      - name: Commit and Push Dockerfile Update
+        if: github.event_name != 'schedule' || steps.check-image.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.get-version.outputs.version }}
+        run: |
+          if git diff --quiet -- Dockerfile; then
+            echo "Dockerfile already uses MLflow $VERSION."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Dockerfile
+          git commit -m "Update MLflow base image to $VERSION"
+          git push origin "HEAD:$GITHUB_REF_NAME"
 
-    - name: Log in to Docker Hub
-      if: steps.check-image.outputs.exists == 'false'
-      uses: docker/login-action@v2
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Log in to Docker Hub
+        if: github.event_name != 'schedule' || steps.check-image.outputs.exists == 'false'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    - name: Build and Push Docker Image
-      if: steps.check-image.outputs.exists == 'false'
-      uses: docker/build-push-action@v4
-      with:
-        context: .
-        push: true
-        tags: |
-          ziadloo/mlflow:${{ env.VERSION }}
-          ziadloo/mlflow:latest
+      - name: Set up Docker Buildx
+        if: github.event_name != 'schedule' || steps.check-image.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and Push Docker Image
+        if: github.event_name != 'schedule' || steps.check-image.outputs.exists == 'false'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: |
+            ziadloo/mlflow:${{ steps.get-version.outputs.version }}
+            ziadloo/mlflow:latest
